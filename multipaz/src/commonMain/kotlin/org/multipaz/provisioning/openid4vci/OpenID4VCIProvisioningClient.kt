@@ -104,11 +104,13 @@ internal class OpenID4VCIProvisioningClient(
             obtainToken(preauthorizedCode = credentialOffer.preauthorizedCode)
             return listOf()
         }
+        val authorizationEndpoint = authorizationConfiguration.authorizationEndpoint
+            ?: throw IllegalStateException("Authorization server metadata: authorization_endpoint must be a string")
         val requestUri = performPushedAuthorizationRequest()
         return listOf(AuthorizationChallenge.OAuth(
             id = "oauth",
             url = buildString {
-                append(authorizationConfiguration.authorizationEndpoint)
+                append(authorizationEndpoint)
                 append("?client_id=")
                 append(clientPreferences.clientId.encodeURLParameter())
                 append("&request_uri=")
@@ -294,6 +296,14 @@ internal class OpenID4VCIProvisioningClient(
         }
 
     private suspend fun performPushedAuthorizationRequest(): String {
+        val parEndpoint = authorizationConfiguration.pushedAuthorizationRequestEndpoint
+            ?: throw IllegalStateException("Authorization server metadata: pushed_authorization_request_endpoint must be a string")
+        if (!authorizationConfiguration.codeResponseTypeSupported) {
+            throw IllegalStateException("response type 'code' is not supported")
+        }
+        if (!authorizationConfiguration.s256CodeChallengeSupported) {
+            throw IllegalStateException("challenge type 'S256' is not supported")
+        }
         maybeObtainClientAttestationChallenge()
 
         pkceCodeVerifier = random.nextBytes(32).toBase64Url()
@@ -329,7 +339,7 @@ internal class OpenID4VCIProvisioningClient(
             val dpop = OpenID4VCIUtil.generateDPoP(
                 dpopKey = dpopKey,
                 clientId = clientPreferences.clientId,
-                requestUrl = authorizationConfiguration.pushedAuthorizationRequestEndpoint,
+                requestUrl = parEndpoint,
                 dpopNonce = authorizationDPoPNonce,
                 accessToken = null
             )
@@ -385,7 +395,7 @@ internal class OpenID4VCIProvisioningClient(
             }
             Logger.dJson(
                 TAG,
-                "Sending PAR request to ${authorizationConfiguration.pushedAuthorizationRequestEndpoint}",
+                "Sending PAR request to $parEndpoint",
                 parParams
             )
 
@@ -395,7 +405,7 @@ internal class OpenID4VCIProvisioningClient(
             walletAttestationPoP?.let { Logger.dJwt(TAG, "PAR OAuth-Client-Attestation-PoP JWT", it) }
 
             response = httpClient.submitForm(
-                url = authorizationConfiguration.pushedAuthorizationRequestEndpoint,
+                url = parEndpoint,
                 formParameters = parameters {
                     if (scope != null) {
                         append("scope", scope)
@@ -459,7 +469,10 @@ internal class OpenID4VCIProvisioningClient(
 
     private suspend fun obtainWalletAttestation(): AsymmetricKey {
         val secureArea = BackendEnvironment.getInterface(SecureAreaProvider::class)!!.get()
-        val endpoint = Url(authorizationConfiguration.pushedAuthorizationRequestEndpoint)
+        val endpoint = Url(
+            authorizationConfiguration.pushedAuthorizationRequestEndpoint
+                ?: authorizationConfiguration.tokenEndpoint
+        )
         // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-attestation-based-client-auth-01
         // Section 6.1. "Client Instance Tracking Across Authorization Servers" recommends
         // using different keys for different servers. We go even further and obtain a fresh
@@ -876,16 +889,21 @@ internal class OpenID4VCIProvisioningClient(
                 TAG,
                 "Creating OpenID4VCIProvisioningClient: issuerUri='${credentialOffer.issuerUri}', configurationId='${credentialOffer.configurationId}'"
             )
+            // TODO: credentialIssuerMetadata and authorizationServerMetadata in CredentialOffer are
+            //  out-of-spec extensions from unmerged OpenID4VCI PR #476
+            //  (https://github.com/openid/OpenID4VCI/pull/476). Remove once standardized/no longer needed.
             val issuerConfig = IssuerConfiguration.get(
                 url = credentialOffer.issuerUri,
                 httpClient = BackendEnvironment.getInterface(HttpClient::class)!!,
-                clientPreferences = clientPreferences
+                clientPreferences = clientPreferences,
+                credentialIssuerMetadata = credentialOffer.credentialIssuerMetadata
             )
             val authorizationServerUrl = credentialOffer.authorizationServer
                 ?: issuerConfig.authorizationServerUrls.first()
             val authorizationConfiguration = AuthorizationConfiguration.get(
                 url = authorizationServerUrl,
-                clientPreferences = clientPreferences
+                clientPreferences = clientPreferences,
+                authorizationServerMetadata = credentialOffer.authorizationServerMetadata
             )
             return OpenID4VCIProvisioningClient(
                 clientPreferences = clientPreferences,
